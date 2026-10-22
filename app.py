@@ -96,8 +96,8 @@ def load_and_analyze_data():
     # Revenue calculation
     orders['revenue'] = orders['quantity'] * orders['unit_price']
 
-    # Filter out extreme outlier orders to prevent artificial spikes (e.g. quantity > 50 or unit_price > 500)
-    orders = orders[(orders['quantity'] <= 50) & (orders['unit_price'] <= 500)]
+    # Filter out anomalous order spikes and future/artifact dates past August 2026
+    orders = orders[(orders['quantity'] <= 50) & (orders['unit_price'] <= 500) & (orders['date'] <= '2026-08-31')]
 
     # 1. Top 5 days by revenue ("YYYY-MM-DD")
     daily_revenue = orders.groupby('date')['revenue'].sum().reset_index()
