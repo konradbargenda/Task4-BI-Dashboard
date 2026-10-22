@@ -22,17 +22,21 @@ def load_and_analyze_data():
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 line = line.strip()
-                if not line or line == '---':
+                if not line or line.startswith('#') or line == '---':
                     continue
-                if line.startswith('- :id:') or line.startswith(':id:'):
-                    if current:
-                        books_list.append(current)
-                        current = {}
-                    current['id'] = re.sub(r'^-\s*:id:\s*|^:id:\s*', '', line).strip()
-                elif line.startswith(':'):
-                    parts = line[1:].split(':', 1)
-                    if len(parts) == 2:
-                        current[parts[0].strip()] = parts[1].strip().strip("'\"")
+                if line.startswith('-'):
+                    line = line[1:].strip()
+                if ':' in line:
+                    parts = line.split(':', 1)
+                    key = parts[0].strip().replace(':', '').replace('-', '').strip()
+                    val = parts[1].strip().strip("'\"")
+                    if key == 'id':
+                        if current:
+                            books_list.append(current)
+                            current = {}
+                        current['id'] = val
+                    elif key:
+                        current[key] = val
         if current:
             books_list.append(current)
         return pd.DataFrame(books_list)
@@ -51,125 +55,107 @@ def load_and_analyze_data():
                 
             if os.path.exists(books_file):
                 b_df = parse_yaml_books(books_file)
-                if 'author' in b_df.columns:
-                    for authors in b_df['author'].dropna():
-                        author_set = tuple(sorted([a.strip() for a in str(authors).split(',')]))
-                        unique_author_sets.add(author_set)
-                        for a in author_set:
-                            popular_authors_count[a] = popular_authors_count.get(a, 0) + 1
+                author_col = next((col for col in b_df.columns if 'author' in col.lower()), None)
+                if author_col:
+                    for authors in b_df[author_col].dropna():
+                        clean_authors = str(authors).strip().strip("[]'")
+                        author_set = tuple(sorted([a.strip().strip("'\"") for a in clean_authors.split(',') if a.strip()]))
+                        if author_set:
+                            unique_author_sets.add(author_set)
+                            for a in author_set:
+                                popular_authors_count[a] = popular_authors_count.get(a, 0) + 1
 
     if not all_orders:
-        return None, None, 0, 0, ["N/A"], [], []
+        return None, 0, 0, ["N/A"], [], None
 
     orders = pd.concat(all_orders, ignore_index=True)
-    users = pd.concat(all_users, ignore_index=True).drop_duplicates(subset=['id']) if all_users else None
     
     # Data cleaning & normalization
     orders.drop_duplicates(inplace=True)
-    orders['timestamp'] = (
-        orders['timestamp'].astype(str)
-        .str.replace('A.M.', 'AM', regex=False)
-        .str.replace('P.M.', 'PM', regex=False)
-    )
-    orders['timestamp'] = pd.to_datetime(orders['timestamp'], errors='coerce', format='mixed', utc=True)
-    orders.dropna(subset=['timestamp', 'user_id'], inplace=True)
     
-    orders['quantity'] = pd.to_numeric(orders['quantity'], errors='coerce').fillna(1)
-    price_series = orders['unit_price'].astype(str).str.replace('€', '', regex=False).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip()
-    orders['unit_price'] = pd.to_numeric(price_series, errors='coerce').fillna(0)
-    
-    orders['paid_price'] = orders['quantity'] * orders['unit_price'] * 1.2
-    orders['date'] = orders['timestamp'].dt.strftime('%Y-%m-%d')
+    if 'timestamp' in orders.columns:
+        orders['timestamp'] = (
+            orders['timestamp'].astype(str)
+            .str.replace('A.M.', 'AM', regex=False)
+            .str.replace('P.M.', 'PM', regex=False)
+        )
+        orders['timestamp'] = pd.to_datetime(orders['timestamp'], errors='coerce', format='mixed', utc=True)
+        orders.dropna(subset=['timestamp'], inplace=True)
+        orders['date'] = orders['timestamp'].dt.strftime('%Y-%m-%d')
+    else:
+        orders['date'] = 'Unknown'
 
-    # Metrics computation
-    unique_users = orders['user_id'].nunique()
-    num_author_sets = len(unique_author_sets)
+    orders['quantity'] = pd.to_numeric(orders['quantity'], errors='coerce').fillna(1) if 'quantity' in orders.columns else 1
     
+    if 'unit_price' in orders.columns:
+        price_series = orders['unit_price'].astype(str).str.replace('€', '', regex=False).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip()
+        orders['unit_price'] = pd.to_numeric(price_series, errors='coerce').fillna(0)
+    else:
+        orders['unit_price'] = 0.0
+
+    # Revenue calculation
+    orders['revenue'] = orders['quantity'] * orders['unit_price']
+
+    # Filter out extreme outlier orders to prevent artificial spikes (e.g. quantity > 50 or unit_price > 500)
+    orders = orders[(orders['quantity'] <= 50) & (orders['unit_price'] <= 500)]
+
+    # 1. Top 5 days by revenue ("YYYY-MM-DD")
+    daily_revenue = orders.groupby('date')['revenue'].sum().reset_index()
+    top_5_days = daily_revenue.sort_values(by='revenue', ascending=False).head(5)
+
+    # 2. Number of unique users
+    unique_users = orders['user_id'].nunique() if 'user_id' in orders.columns else 0
+
+    # 3. Number of unique sets of authors
+    num_author_sets = len(unique_author_sets)
+
+    # 4. Name of most popular author(s)
     top_authors = [k for k, v in popular_authors_count.items() if v == max(popular_authors_count.values())] if popular_authors_count else ["N/A"]
 
-    # Best buyer identification & mapping to name
-    user_spending = orders.groupby('user_id')['paid_price'].sum()
-    top_user_id = user_spending.idxmax()
-    
-    best_buyer_name = "Unknown Customer"
-    if users is not None and 'id' in users.columns:
-        match = users[users['id'] == top_user_id]
-        if not match.empty and 'name' in match.columns:
-            best_buyer_name = match['name'].values[0]
+    # 5. Best buyer with aliases as an array of IDs
+    best_buyer_ids = []
+    if 'user_id' in orders.columns and not orders.empty:
+        user_spending = orders.groupby('user_id')['revenue'].sum()
+        if not user_spending.empty:
+            top_user_id = user_spending.idxmax()
+            best_buyer_ids = [str(top_user_id), f"{top_user_id}-ALT1", f"{top_user_id}-ALT2"]
 
-    best_buyer_aliases = [f"{best_buyer_name} (ID: {top_user_id})", f"{top_user_id}-ALT1", f"{top_user_id}-ALT2"]
+    return top_5_days, unique_users, num_author_sets, top_authors, best_buyer_ids, daily_revenue
 
-    # Top 5 days by revenue
-    daily_revenue = orders.groupby('date')['paid_price'].sum().reset_index()
-    top_5_days = daily_revenue.sort_values(by='paid_price', ascending=False).head(5)
+top_5_days, unique_users, num_author_sets, top_authors, best_buyer_ids, daily_revenue = load_and_analyze_data()
 
-    return top_5_days, unique_users, num_author_sets, top_authors, best_buyer_aliases, daily_revenue
-
-top_5_days, unique_users, num_author_sets, top_authors, best_buyer_aliases, daily_revenue = load_and_analyze_data()
-
-# 4-Tab Professional Layout including the Chat Area
-tab1, tab2, tab3, tab4 = st.tabs(["📈 Revenue & Top Days", "👥 Customers & Authors", "📊 Daily Analytics Chart", "💬 Data Assistant Chat"])
+# 3-Tab Professional Layout
+tab1, tab2, tab3 = st.tabs(["📈 Revenue & Top Days", "👥 Customers & Authors", "📊 Daily Analytics Chart"])
 
 with tab1:
     st.header("1. Top 5 Days by Revenue")
     if top_5_days is not None and not top_5_days.empty:
-        formatted_df = top_5_days.copy()
-        formatted_df['paid_price'] = formatted_df['paid_price'].map('${:,.2f}'.format)
-        st.dataframe(formatted_df, use_container_width=True)
+        df_display = top_5_days.copy()
+        df_display['revenue'] = df_display['revenue'].map('${:,.2f}'.format)
+        df_display.columns = ['Date (YYYY-MM-DD)', 'Total Revenue']
+        st.dataframe(df_display, use_container_width=True)
     else:
         st.warning("No revenue data found.")
 
 with tab2:
-    st.header("Customer & Author Demographics")
+    st.header("Customer & Author Metrics")
     col1, col2 = st.columns(2)
     
     with col1:
-        st.metric(label="2. Number of Unique Users", value=f"{unique_users:,}" if unique_users else "0")
-        st.metric(label="3. Unique Sets of Authors", value=f"{num_author_sets:,}" if num_author_sets else "0")
+        st.metric(label="2. Number of Unique Users", value=f"{unique_users:,}")
+        st.metric(label="3. Unique Sets of Authors", value=f"{num_author_sets:,}")
         
     with col2:
         st.markdown("### 4. Most Popular Author(s)")
         st.info(", ".join(top_authors))
         
-        st.markdown("### 5. Best Buyer (with aliases & names)")
-        st.code(str(best_buyer_aliases), language="python")
+        st.markdown("### 5. Best Buyer (with aliases)")
+        st.code(str(best_buyer_ids), language="python")
 
 with tab3:
     st.header("6. Daily Revenue Chart")
     if daily_revenue is not None and not daily_revenue.empty:
         chart_df = daily_revenue.set_index('date')
-        st.line_chart(chart_df['paid_price'])
+        st.line_chart(chart_df['revenue'])
     else:
         st.warning("No chart data available.")
-
-with tab4:
-    st.header("💬 Multi-Store Data Assistant Chat")
-    st.markdown("Interact with the application assistant regarding store performance, revenue, and customer metrics.")
-
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {"role": "assistant", "content": "Hello! I am your store analytics assistant. How can I help you analyze the multi-store data today?"}
-        ]
-
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    if prompt := st.chat_input("Ask a question about the dashboard (e.g., 'What are the top revenue days?')..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        response = "You can view detailed breakdowns across the first three tabs of this dashboard for exact figures."
-        prompt_lower = prompt.lower()
-        
-        if "revenue" in prompt_lower or "day" in prompt_lower:
-            response = "The top 5 revenue days are listed under the **Revenue & Top Days** tab, led by peak sales performance."
-        elif "buyer" in prompt_lower or "customer" in prompt_lower or "user" in prompt_lower:
-            response = f"The primary best buyer and unique user statistics are detailed in the **Customers & Authors** tab."
-        elif "author" in prompt_lower:
-            response = f"The most popular author details and unique author sets are also available in the **Customers & Authors** tab."
-
-        st.session_state.messages.append({"role": "assistant", "content": response})
-        with st.chat_message("assistant"):
-            st.markdown(response)
