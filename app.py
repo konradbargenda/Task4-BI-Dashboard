@@ -10,49 +10,53 @@ st.set_page_config(page_title="Multi-Store BI Dashboard", layout="wide")
 st.title("📊 Multi-Store Executive BI Dashboard")
 st.markdown("Professional multi-store analytics covering revenue trends, customer purchasing power, and author demographics.")
 
+stores = [s for s in sorted(glob.glob('STORE*')) if os.path.isdir(s)]
+selected_store = st.sidebar.selectbox("Select Store", options=["All Stores"] + stores)
+
 @st.cache_data
-def load_and_analyze_data():
+def load_and_analyze_data(chosen_store):
     all_orders = []
     unique_author_sets = set()
     popular_authors_count = {}
     
-    for store in sorted(glob.glob('STORE*')):
-        if os.path.isdir(store):
-            orders_file = os.path.join(store, 'orders.parquet')
-            books_file = os.path.join(store, 'books.yaml')
+    target_stores = stores if chosen_store == "All Stores" else [chosen_store]
+    
+    for store in target_stores:
+        orders_file = os.path.join(store, 'orders.parquet')
+        books_file = os.path.join(store, 'books.yaml')
+        
+        if os.path.exists(orders_file):
+            df_ord = pd.read_parquet(orders_file)
+            df_ord['store_source'] = store
+            all_orders.append(df_ord)
             
-            if os.path.exists(orders_file):
-                df_ord = pd.read_parquet(orders_file)
-                df_ord['store_source'] = store
-                all_orders.append(df_ord)
-                
-            if os.path.exists(books_file):
-                try:
-                    with open(books_file, 'r', encoding='utf-8') as f:
-                        b_data = yaml.safe_load(f)
-                        if isinstance(b_data, list):
-                            b_df = pd.DataFrame(b_data)
-                        elif isinstance(b_data, dict):
-                            b_df = pd.DataFrame([b_data])
-                        else:
-                            b_df = pd.DataFrame()
-                        
-                        if not b_df.empty:
-                            author_col = next((col for col in b_df.columns if 'author' in str(col).lower() or 'writer' in str(col).lower()), None)
-                            if author_col:
-                                for authors in b_df[author_col].dropna():
-                                    if isinstance(authors, list):
-                                        author_set = tuple(sorted([str(a).strip().strip("'\"") for a in authors if str(a).strip()]))
-                                    else:
-                                        clean_authors = str(authors).strip().strip("[]'")
-                                        author_set = tuple(sorted([a.strip().strip("'\"") for a in clean_authors.split(',') if a.strip()]))
-                                    
-                                    if author_set:
-                                        unique_author_sets.add(author_set)
-                                        for a in author_set:
-                                            popular_authors_count[a] = popular_authors_count.get(a, 0) + 1
-                except Exception:
-                    pass
+        if os.path.exists(books_file):
+            try:
+                with open(books_file, 'r', encoding='utf-8') as f:
+                    b_data = yaml.safe_load(f)
+                    if isinstance(b_data, list):
+                        b_df = pd.DataFrame(b_data)
+                    elif isinstance(b_data, dict):
+                        b_df = pd.DataFrame([b_data])
+                    else:
+                        b_df = pd.DataFrame()
+                    
+                    if not b_df.empty:
+                        author_col = next((col for col in b_df.columns if 'author' in str(col).lower() or 'writer' in str(col).lower()), None)
+                        if author_col:
+                            for authors in b_df[author_col].dropna():
+                                if isinstance(authors, list):
+                                    author_set = tuple(sorted([str(a).strip().strip("'\"") for a in authors if str(a).strip()]))
+                                else:
+                                    clean_authors = str(authors).strip().strip("[]'")
+                                    author_set = tuple(sorted([a.strip().strip("'\"") for a in clean_authors.split(',') if a.strip()]))
+                                
+                                if author_set:
+                                    unique_author_sets.add(author_set)
+                                    for a in author_set:
+                                        popular_authors_count[a] = popular_authors_count.get(a, 0) + 1
+            except Exception:
+                pass
 
     if not all_orders:
         return None, 0, 0, ["N/A"], [], None
@@ -117,7 +121,7 @@ def load_and_analyze_data():
 
     return top_5_days, unique_users, num_author_sets, top_authors, best_buyer_ids, daily_revenue
 
-top_5_days, unique_users, num_author_sets, top_authors, best_buyer_ids, daily_revenue = load_and_analyze_data()
+top_5_days, unique_users, num_author_sets, top_authors, best_buyer_ids, daily_revenue = load_and_analyze_data(selected_store)
 
 tab1, tab2, tab3 = st.tabs(["📈 Revenue & Top Days", "👥 Customers & Authors", "📊 Daily Analytics Chart"])
 
