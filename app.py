@@ -59,7 +59,7 @@ def load_and_analyze_data():
                             popular_authors_count[a] = popular_authors_count.get(a, 0) + 1
 
     if not all_orders:
-        return None, None, 0, 0, "N/A", [], []
+        return None, None, 0, 0, ["N/A"], [], []
 
     orders = pd.concat(all_orders, ignore_index=True)
     users = pd.concat(all_users, ignore_index=True).drop_duplicates(subset=['id']) if all_users else None
@@ -107,8 +107,8 @@ def load_and_analyze_data():
 
 top_5_days, unique_users, num_author_sets, top_authors, best_buyer_aliases, daily_revenue = load_and_analyze_data()
 
-# 3-Tab Professional Layout
-tab1, tab2, tab3 = st.tabs(["📈 Revenue & Top Days", "👥 Customers & Authors", "📊 Daily Analytics Chart"])
+# 4-Tab Professional Layout including the Chat Area
+tab1, tab2, tab3, tab4 = st.tabs(["📈 Revenue & Top Days", "👥 Customers & Authors", "📊 Daily Analytics Chart", "💬 Data Assistant Chat"])
 
 with tab1:
     st.header("1. Top 5 Days by Revenue")
@@ -141,3 +141,35 @@ with tab3:
         st.line_chart(chart_df['paid_price'])
     else:
         st.warning("No chart data available.")
+
+with tab4:
+    st.header("💬 Multi-Store Data Assistant Chat")
+    st.markdown("Interact with the application assistant regarding store performance, revenue, and customer metrics.")
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Hello! I am your store analytics assistant. How can I help you analyze the multi-store data today?"}
+        ]
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("Ask a question about the dashboard (e.g., 'What are the top revenue days?')..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        response = "You can view detailed breakdowns across the first three tabs of this dashboard for exact figures."
+        prompt_lower = prompt.lower()
+        
+        if "revenue" in prompt_lower or "day" in prompt_lower:
+            response = "The top 5 revenue days are listed under the **Revenue & Top Days** tab, led by peak sales performance."
+        elif "buyer" in prompt_lower or "customer" in prompt_lower or "user" in prompt_lower:
+            response = f"The primary best buyer and unique user statistics are detailed in the **Customers & Authors** tab."
+        elif "author" in prompt_lower:
+            response = f"The most popular author details and unique author sets are also available in the **Customers & Authors** tab."
+
+        st.session_state.messages.append({"role": "assistant", "content": response})
+        with st.chat_message("assistant"):
+            st.markdown(response)
