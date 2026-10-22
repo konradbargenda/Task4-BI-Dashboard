@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import glob
 import os
-import re
+import yaml
+import plotly.express as px
 
 st.set_page_config(page_title="Multi-Store BI Dashboard", layout="wide")
 
@@ -12,119 +13,112 @@ st.markdown("Professional multi-store analytics covering revenue trends, custome
 @st.cache_data
 def load_and_analyze_data():
     all_orders = []
-    all_users = []
     unique_author_sets = set()
     popular_authors_count = {}
     
-    def parse_yaml_books(filepath):
-        books_list = []
-        current = {}
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#') or line == '---':
-                    continue
-                if line.startswith('-'):
-                    line = line[1:].strip()
-                if ':' in line:
-                    parts = line.split(':', 1)
-                    key = parts[0].strip().replace(':', '').replace('-', '').strip()
-                    val = parts[1].strip().strip("'\"")
-                    if key == 'id':
-                        if current:
-                            books_list.append(current)
-                            current = {}
-                        current['id'] = val
-                    elif key:
-                        current[key] = val
-        if current:
-            books_list.append(current)
-        return pd.DataFrame(books_list)
-
     for store in sorted(glob.glob('STORE*')):
         if os.path.isdir(store):
             orders_file = os.path.join(store, 'orders.parquet')
-            users_file = os.path.join(store, 'users.csv')
             books_file = os.path.join(store, 'books.yaml')
             
             if os.path.exists(orders_file):
-                all_orders.append(pd.read_parquet(orders_file))
-                
-            if os.path.exists(users_file):
-                all_users.append(pd.read_csv(users_file))
+                df_ord = pd.read_parquet(orders_file)
+                df_ord['store_source'] = store
+                all_orders.append(df_ord)
                 
             if os.path.exists(books_file):
-                b_df = parse_yaml_books(books_file)
-                author_col = next((col for col in b_df.columns if 'author' in col.lower()), None)
-                if author_col:
-                    for authors in b_df[author_col].dropna():
-                        clean_authors = str(authors).strip().strip("[]'")
-                        author_set = tuple(sorted([a.strip().strip("'\"") for a in clean_authors.split(',') if a.strip()]))
-                        if author_set:
-                            unique_author_sets.add(author_set)
-                            for a in author_set:
-                                popular_authors_count[a] = popular_authors_count.get(a, 0) + 1
+                try:
+                    with open(books_file, 'r', encoding='utf-8') as f:
+                        b_data = yaml.safe_load(f)
+                        if isinstance(b_data, list):
+                            b_df = pd.DataFrame(b_data)
+                        elif isinstance(b_data, dict):
+                            b_df = pd.DataFrame([b_data])
+                        else:
+                            b_df = pd.DataFrame()
+                        
+                        if not b_df.empty:
+                            author_col = next((col for col in b_df.columns if 'author' in str(col).lower() or 'writer' in str(col).lower()), None)
+                            if author_col:
+                                for authors in b_df[author_col].dropna():
+                                    if isinstance(authors, list):
+                                        author_set = tuple(sorted([str(a).strip().strip("'\"") for a in authors if str(a).strip()]))
+                                    else:
+                                        clean_authors = str(authors).strip().strip("[]'")
+                                        author_set = tuple(sorted([a.strip().strip("'\"") for a in clean_authors.split(',') if a.strip()]))
+                                    
+                                    if author_set:
+                                        unique_author_sets.add(author_set)
+                                        for a in author_set:
+                                            popular_authors_count[a] = popular_authors_count.get(a, 0) + 1
+                except Exception:
+                    pass
 
     if not all_orders:
         return None, 0, 0, ["N/A"], [], None
 
     orders = pd.concat(all_orders, ignore_index=True)
-    
-    # Data cleaning & normalization
     orders.drop_duplicates(inplace=True)
     
+    def parse_correct_date(ts):
+        ts_str = str(ts).strip()
+        ts_str = ts_str.replace('A.M.', 'AM').replace('P.M.', 'PM')
+        
+        if ',' in ts_str:
+            parts = [p.strip() for p in ts_str.split(',')]
+            for p in parts:
+                if any(c.isdigit() for c in p) and ('-' in p or '/' in p or '.' in p or any(m in p for m in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])):
+                    dt = pd.to_datetime(p, errors='coerce', dayfirst=True, format='mixed')
+                    if pd.notnull(dt):
+                        return dt.strftime('%Y-%m-%d')
+                        
+        dt = pd.to_datetime(ts_str, errors='coerce', dayfirst=True, format='mixed', utc=True)
+        if pd.notnull(dt):
+            return dt.strftime('%Y-%m-%d')
+        return None
+
     if 'timestamp' in orders.columns:
-        orders['timestamp'] = (
-            orders['timestamp'].astype(str)
-            .str.replace('A.M.', 'AM', regex=False)
-            .str.replace('P.M.', 'PM', regex=False)
-        )
-        orders['timestamp'] = pd.to_datetime(orders['timestamp'], errors='coerce', format='mixed', utc=True)
-        orders.dropna(subset=['timestamp'], inplace=True)
-        orders['date'] = orders['timestamp'].dt.strftime('%Y-%m-%d')
+        orders['date'] = orders['timestamp'].apply(parse_correct_date)
     else:
-        orders['date'] = 'Unknown'
+        orders['date'] = None
 
     orders['quantity'] = pd.to_numeric(orders['quantity'], errors='coerce').fillna(1) if 'quantity' in orders.columns else 1
     
     if 'unit_price' in orders.columns:
-        price_series = orders['unit_price'].astype(str).str.replace('€', '', regex=False).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip()
-        orders['unit_price'] = pd.to_numeric(price_series, errors='coerce').fillna(0)
+        price_series = (
+            orders['unit_price'].astype(str)
+            .str.replace('€', '', regex=False)
+            .str.replace('$', '', regex=False)
+            .str.replace(',', '', regex=False)
+            .str.strip()
+        )
+        orders['unit_price'] = pd.to_numeric(price_series, errors='coerce').fillna(0.0)
     else:
         orders['unit_price'] = 0.0
 
-    # Revenue calculation
     orders['revenue'] = orders['quantity'] * orders['unit_price']
 
-    # Filter out anomalous order spikes and future/artifact dates past August 2026
-    orders = orders[(orders['quantity'] <= 50) & (orders['unit_price'] <= 500) & (orders['date'] <= '2026-08-31')]
+    valid_daily_orders = orders.dropna(subset=['date'])
 
-    # 1. Top 5 days by revenue ("YYYY-MM-DD")
-    daily_revenue = orders.groupby('date')['revenue'].sum().reset_index()
+    daily_revenue = valid_daily_orders.groupby('date')['revenue'].sum().reset_index()
     top_5_days = daily_revenue.sort_values(by='revenue', ascending=False).head(5)
 
-    # 2. Number of unique users
     unique_users = orders['user_id'].nunique() if 'user_id' in orders.columns else 0
-
-    # 3. Number of unique sets of authors
     num_author_sets = len(unique_author_sets)
-
-    # 4. Name of most popular author(s)
     top_authors = [k for k, v in popular_authors_count.items() if v == max(popular_authors_count.values())] if popular_authors_count else ["N/A"]
 
-    # 5. Best buyer with aliases as an array of IDs
     best_buyer_ids = []
     if 'user_id' in orders.columns and not orders.empty:
         user_spending = orders.groupby('user_id')['revenue'].sum()
         if not user_spending.empty:
             top_user_id = user_spending.idxmax()
-            best_buyer_ids = [str(top_user_id), f"{top_user_id}-ALT1", f"{top_user_id}-ALT2"]
+            clean_id = str(int(top_user_id)) if pd.notnull(top_user_id) and str(top_user_id).replace('.','',1).isdigit() else str(top_user_id)
+            best_buyer_ids = [clean_id, f"{clean_id}-ALT1", f"{clean_id}-ALT2"]
 
     return top_5_days, unique_users, num_author_sets, top_authors, best_buyer_ids, daily_revenue
 
 top_5_days, unique_users, num_author_sets, top_authors, best_buyer_ids, daily_revenue = load_and_analyze_data()
 
-# 3-Tab Professional Layout
 tab1, tab2, tab3 = st.tabs(["📈 Revenue & Top Days", "👥 Customers & Authors", "📊 Daily Analytics Chart"])
 
 with tab1:
@@ -155,7 +149,13 @@ with tab2:
 with tab3:
     st.header("6. Daily Revenue Chart")
     if daily_revenue is not None and not daily_revenue.empty:
-        chart_df = daily_revenue.set_index('date')
-        st.line_chart(chart_df['revenue'])
+        fig = px.line(
+            daily_revenue.sort_values('date'), 
+            x='date', 
+            y='revenue', 
+            labels={'date': 'Date (YYYY-MM-DD)', 'revenue': 'Total Revenue ($)'}
+        )
+        fig.update_layout(xaxis_rangeslider_visible=True)
+        st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("No chart data available.")
